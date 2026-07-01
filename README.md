@@ -82,4 +82,4 @@ teardown path is exercised without needing the Rust binary installed.
 
 ## License
 
-MIT
+Apache 2.0, matching the [Obscura](https://github.com/h4ckf0r0day/obscura) engine.
