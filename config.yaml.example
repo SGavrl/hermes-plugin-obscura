@@ -1,0 +1,4 @@
+# Select Obscura as the browser backend. Opt-in; never auto-selected.
+# Copy the relevant part into your Hermes config.yaml.
+browser:
+  cloud_provider: "obscura"

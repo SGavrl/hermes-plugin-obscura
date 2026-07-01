@@ -1,0 +1,21 @@
+[project]
+name = "hermes-plugin-obscura"
+version = "1.0.0"
+description = "Obscura local headless browser backend for Hermes (spawns obscura serve, drives it over CDP)."
+requires-python = ">=3.9"
+dependencies = [
+    "requests",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "requests",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# importlib mode imports each test module in isolation, so the repo-root
+# __init__.py (a Hermes plugin package entry, not a test package) is never
+# pulled into collection.
+addopts = "-q --import-mode=importlib"
