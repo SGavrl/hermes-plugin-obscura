@@ -97,6 +97,7 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "OBSCURA_STEALTH",
         "OBSCURA_PORT",
         "OBSCURA_STARTUP_TIMEOUT",
+        "OBSCURA_CDP_URL",
     ):
         monkeypatch.delenv(k, raising=False)
 
@@ -211,3 +212,96 @@ def test_port_override_is_honored(
         assert session["cdp_url"] == f"ws://127.0.0.1:{port}/devtools/browser"
     finally:
         provider.close_session(session["bb_session_id"])
+
+
+# ---------------------------------------------------------------------------
+# Remote mode (OBSCURA_CDP_URL): connect to an already-running server
+# (e.g. obscura in Docker) instead of spawning a local process.
+# ---------------------------------------------------------------------------
+
+
+import threading  # noqa: E402
+import http.server  # noqa: E402
+
+
+class _FakeRemoteServer:
+    """A real HTTP server that answers /json/version like a running obscura."""
+
+    def __init__(self, port: int):
+        ws = "ws://127.0.0.1:%d/devtools/browser" % port
+        payload = json.dumps(
+            {"Browser": "Obscura/fake-remote", "webSocketDebuggerUrl": ws}
+        ).encode()
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/json/version":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+            def log_message(self, *a):
+                pass
+
+        self._httpd = http.server.HTTPServer(("127.0.0.1", port), Handler)
+        self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
+        self.ws = ws
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._httpd.shutdown()
+
+
+def test_remote_mode_is_available_without_binary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # No local binary, but a server URL is set: still available.
+    monkeypatch.setenv("OBSCURA_BIN", "/nonexistent/obscura")
+    monkeypatch.setenv("OBSCURA_CDP_URL", "http://127.0.0.1:9222")
+    assert ObscuraBrowserProvider().is_available() is True
+
+
+def test_remote_mode_connects_without_spawning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # No OBSCURA_BIN at all: prove create_session never tries to spawn.
+    monkeypatch.setenv("OBSCURA_BIN", "/nonexistent/obscura")
+    port = _free_port()
+    with _FakeRemoteServer(port) as server:
+        monkeypatch.setenv("OBSCURA_CDP_URL", f"http://127.0.0.1:{port}")
+        provider = ObscuraBrowserProvider()
+        session = provider.create_session("task-remote")
+        assert session["cdp_url"] == server.ws
+        assert session["features"]["remote"] is True
+        assert session["features"]["local"] is False
+        # No process was tracked; close is a no-op that reports success.
+        assert provider._procs == {}
+        assert provider.close_session(session["bb_session_id"]) is True
+
+
+def test_remote_mode_normalizes_ws_and_trailing_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    port = _free_port()
+    with _FakeRemoteServer(port):
+        # ws:// scheme and a /devtools/... path should both be tolerated.
+        monkeypatch.setenv("OBSCURA_CDP_URL", f"ws://127.0.0.1:{port}/devtools/browser")
+        session = ObscuraBrowserProvider().create_session("task-remote-2")
+        assert session["features"]["remote"] is True
+
+
+def test_remote_mode_raises_when_server_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OBSCURA_CDP_URL", f"http://127.0.0.1:{_free_port()}")
+    monkeypatch.setenv("OBSCURA_STARTUP_TIMEOUT", "1")
+    with pytest.raises(RuntimeError, match="did not respond"):
+        ObscuraBrowserProvider().create_session("task-remote-3")
