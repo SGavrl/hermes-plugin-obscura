@@ -49,10 +49,11 @@ session and owns its lifecycle. Just have the binary on `PATH` or set
 
 **Remote / Docker.** Point the plugin at an already-running `obscura serve` and
 it connects instead of spawning. The external server owns its own lifecycle, so
-the plugin never starts or stops it. Run Obscura in its own container:
+the plugin never starts or stops it. The official image already serves CDP on
+`0.0.0.0:9222` by default:
 
 ```bash
-docker run -d -p 9222:9222 <obscura-image> serve --host 0.0.0.0 --port 9222
+docker run -d -p 9222:9222 h4ckf0r0day/obscura
 ```
 
 then set `OBSCURA_CDP_URL`:
