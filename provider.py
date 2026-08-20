@@ -332,13 +332,24 @@ def _await_remote_cdp(base: str, timeout: float) -> Optional[str]:
     """
     deadline = time.monotonic() + timeout
     version_url = f"{base}/json/version"
+    # Parse OBSCURA_CDP_URL base so we can rewrite Obscura's hard-coded
+    # ``webSocketDebuggerUrl`` (it always reports 127.0.0.1:9222 — useless
+    # when served behind a reverse proxy like Traefik/Dokploy).
+    from urllib.parse import urlparse
+    parsed = urlparse(base)
+    pub_host = parsed.hostname or ""
+    pub_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    pub_scheme = "wss" if parsed.scheme == "https" else "ws"
     while time.monotonic() < deadline:
         try:
             resp = requests.get(version_url, timeout=2.0)
             if resp.ok:
                 ws_url = resp.json().get("webSocketDebuggerUrl")
                 if ws_url:
-                    return ws_url
+                    # Rewrite to public host/scheme so the CDP websocket
+                    # goes through the proxy (TLS terminates at Traefik,
+                    # 443 → upstream :9222 is routed by Dokploy config).
+                    return f"{pub_scheme}://{pub_host}:{pub_port}/devtools/browser"
         except requests.RequestException:
             pass
         time.sleep(0.2)
