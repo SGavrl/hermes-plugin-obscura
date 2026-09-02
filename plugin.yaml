@@ -6,5 +6,6 @@ author: SGavrl
 kind: backend
 provides_browser_providers:
   - obscura
-provides_tools: []
+provides_tools:
+  - obscura_browser_info
 provides_hooks: []

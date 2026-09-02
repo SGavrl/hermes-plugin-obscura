@@ -1,7 +1,5 @@
+.env
+config.yaml
+provider.py.bak
 __pycache__/
 *.pyc
-.pytest_cache/
-*.egg-info/
-.venv/
-build/
-dist/

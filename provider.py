@@ -30,6 +30,8 @@ Env vars::
     OBSCURA_STEALTH=false        # local mode: pass --stealth (default false)
     OBSCURA_PORT=                # local mode: fixed CDP port (default: an ephemeral free port)
     OBSCURA_STARTUP_TIMEOUT=15   # seconds to wait for the CDP server (default 15)
+    OBSCURA_BEARER_TOKEN=        # optional bearer token for CDP auth (Authorization: Bearer ...)
+    OBSCURA_MCP_URL=             # optional exposes browser_mcp server-style tool to the agent
 """
 
 from __future__ import annotations
@@ -323,6 +325,33 @@ def _remote_cdp_base() -> Optional[str]:
     return f"{scheme}://{host_port}"
 
 
+def _bearer_headers() -> Dict[str, str]:
+    """Return HTTP headers carrying the bearer token, if OBSCURA_BEARER_TOKEN is set.
+
+    The token is sent as ``Authorization: Bearer <token>`` on every HTTP probe
+    against the remote Obscura endpoint (e.g. ``/json/version``). WebSocket
+    upgrade is driven by the python websocket-client library which reuses the
+    ``Authorization`` header from the handshake; setting it here keeps auth
+    working end-to-end without per-call plumbing.
+    """
+    token = os.environ.get("OBSCURA_BEARER_TOKEN", "").strip()
+    if not token:
+        return {}
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _mcp_url() -> Optional[str]:
+    """Return the configured Obscura MCP endpoint, or None.
+
+    The MCP URL is the same server but exposes a JSON-RPC over HTTP/SSE
+    surface instead of the CDP ``/json/version`` probe. Surfacing it via the
+    plugin lets the agent use the same identity/bearer credentials without a
+    second MCP entry in ``mcp_servers``.
+    """
+    raw = os.environ.get("OBSCURA_MCP_URL", "").strip().rstrip("/")
+    return raw or None
+
+
 def _await_remote_cdp(base: str, timeout: float) -> Optional[str]:
     """Poll a remote server's ``/json/version`` until it answers.
 
@@ -342,7 +371,7 @@ def _await_remote_cdp(base: str, timeout: float) -> Optional[str]:
     pub_scheme = "wss" if parsed.scheme == "https" else "ws"
     while time.monotonic() < deadline:
         try:
-            resp = requests.get(version_url, timeout=2.0)
+            resp = requests.get(version_url, timeout=2.0, headers=_bearer_headers())
             if resp.ok:
                 ws_url = resp.json().get("webSocketDebuggerUrl")
                 if ws_url:
