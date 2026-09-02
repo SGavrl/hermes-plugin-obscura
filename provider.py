@@ -30,7 +30,7 @@ Env vars::
     OBSCURA_STEALTH=false        # local mode: pass --stealth (default false)
     OBSCURA_PORT=                # local mode: fixed CDP port (default: an ephemeral free port)
     OBSCURA_STARTUP_TIMEOUT=15   # seconds to wait for the CDP server (default 15)
-    OBSCURA_BEARER_TOKEN=        # optional bearer token for CDP auth (Authorization: Bearer ...)
+    OBSCURA_TOKEN=        # optional bearer token for CDP auth (Authorization: Bearer ...)
     OBSCURA_MCP_URL=             # optional exposes browser_mcp server-style tool to the agent
 """
 
@@ -326,7 +326,7 @@ def _remote_cdp_base() -> Optional[str]:
 
 
 def _bearer_headers() -> Dict[str, str]:
-    """Return HTTP headers carrying the bearer token, if OBSCURA_BEARER_TOKEN is set.
+    """Return HTTP headers carrying the bearer token, if OBSCURA_TOKEN is set.
 
     The token is sent as ``Authorization: Bearer <token>`` on every HTTP probe
     against the remote Obscura endpoint (e.g. ``/json/version``). WebSocket
@@ -334,7 +334,7 @@ def _bearer_headers() -> Dict[str, str]:
     ``Authorization`` header from the handshake; setting it here keeps auth
     working end-to-end without per-call plumbing.
     """
-    token = os.environ.get("OBSCURA_BEARER_TOKEN", "").strip()
+    token = os.environ.get("OBSCURA_TOKEN", "").strip()
     if not token:
         return {}
     return {"Authorization": f"Bearer {token}"}
