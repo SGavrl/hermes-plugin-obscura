@@ -1,7 +1,7 @@
 manifest_version: 1
 name: browser-obscura
-version: 1.0.0
-description: "Obscura local headless browser backend. Spawns `obscura serve` and drives it over CDP, a Rust engine with no Chrome or Node dependency (~70 MB binary, ~30 MB RAM). Opt-in via browser.cloud_provider: obscura; never auto-selected."
+version: 1.1.0
+description: "Obscura local or remote headless browser backend for Hermes. Spawns `obscura serve` or connects through OBSCURA_CDP_URL; opt-in via browser.cloud_provider: obscura."
 author: SGavrl
 kind: backend
 provides_browser_providers:

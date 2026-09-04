@@ -5,9 +5,8 @@ Run [Hermes](https://github.com/NousResearch/hermes-agent) browser tasks on
 speaks the Chrome DevTools Protocol with no Chrome or Node.js dependency. One
 ~70 MB binary, ~30 MB RAM at runtime, instant cold start.
 
-This is a **local** browser backend. Instead of calling a cloud API, the plugin
-spawns `obscura serve` on a free port and hands the agent that process's CDP
-endpoint, one process per session, torn down on session close.
+The plugin can spawn a local `obscura serve` process or connect to an existing
+local/remote CDP endpoint through `OBSCURA_CDP_URL`.
 
 ## Why Obscura
 
@@ -21,14 +20,14 @@ endpoint, one process per session, torn down on session close.
 
 ## Install
 
-1. Get the Obscura binary on the host: build it from
+1. For local mode, get the Obscura binary on the host: build it from
    [h4ckf0r0day/obscura](https://github.com/h4ckf0r0day/obscura) and put it on
-   `PATH`, or point `OBSCURA_BIN` at it.
+   `PATH`, or point `OBSCURA_BIN` at it. Skip this for remote mode.
 
 2. Install the plugin:
 
    ```
-   hermes plugins install SGavrl/hermes-plugin-obscura
+   hermes plugins install Company-OS-IA/hermes-obscura-plugin
    ```
 
 3. Select it in `config.yaml`:
@@ -38,8 +37,8 @@ endpoint, one process per session, torn down on session close.
      cloud_provider: "obscura"
    ```
 
-   It is opt-in and never auto-selected. When set, Hermes spawns `obscura serve`
-   and routes browser tools through it.
+   It is opt-in and never auto-selected. Hermes then routes browser tools
+   through the local or remote Obscura endpoint.
 
 ## Two modes
 
@@ -56,7 +55,7 @@ the plugin never starts or stops it. The official image already serves CDP on
 docker run -d -p 9222:9222 h4ckf0r0day/obscura
 ```
 
-then set `OBSCURA_CDP_URL`:
+then set the environment in `~/.hermes/.env`:
 
 ```bash
 OBSCURA_CDP_URL=http://127.0.0.1:9222
@@ -71,18 +70,38 @@ All optional, via environment variables:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `OBSCURA_CDP_URL` | (unset) | Connect to a running server (remote mode). Unset means spawn locally. Accepts `http(s)://host:port` or a `ws(s)://` endpoint. |
-| `OBSCURA_BIN` | `obscura` | Local mode: binary path, or a name resolved on `PATH`. |
+| `OBSCURA_CDP_URL` | (unset) | Remote server base URL. Unset or blank means spawn locally. Accepts `http(s)://host:port`; `ws(s)://` is also accepted and normalized for `/json/version` discovery. |
+| `OBSCURA_TOKEN` | (unset) | Optional Bearer token sent to `/json/version`. The proxy must return a signed/authenticated WebSocket URL. |
+| `OBSCURA_BIN` | `obscura` | Local mode: binary path, or a name resolved on `PATH`. Blank also uses `obscura`. |
 | `OBSCURA_STEALTH` | `false` | Local mode: pass `--stealth` (consistent fingerprint + tracker blocking). |
 | `OBSCURA_PORT` | (ephemeral) | Local mode: fixed CDP port. Default asks the OS for a free port. |
 | `OBSCURA_STARTUP_TIMEOUT` | `15` | Seconds to wait for the CDP server to come up. |
 
+Set these values in `~/.hermes/.env` (or the Hermes process environment). The
+Hermes provider picker does not currently represent optional either/or fields,
+so it intentionally does not prompt for `OBSCURA_BIN` and `OBSCURA_CDP_URL`.
 See `.env.example` and `config.yaml.example`.
+
+### Authenticated reverse proxy
+
+Use HTTPS when the remote endpoint requires authentication:
+
+```bash
+OBSCURA_CDP_URL=https://browser.example.com
+OBSCURA_TOKEN=your-bearer-token
+```
+
+The plugin sends `Authorization: Bearer <token>` only to
+`GET /json/version`. That response must contain a reachable, signed or otherwise
+authenticated `webSocketDebuggerUrl`; Hermes connects to that URL without custom
+headers. If Obscura advertises a loopback address, the plugin replaces only its
+scheme and authority with `OBSCURA_CDP_URL`, preserving the path and query string.
+Plain HTTP with a token is accepted only for localhost.
 
 ## How it works
 
 `ObscuraBrowserProvider` implements the Hermes
-[`BrowserProvider`](https://github.com/NousResearch/hermes-agent/blob/main/agent/browser_provider.py)
+[`BrowserProvider`](https://hermes-agent.nousresearch.com/docs/developer-guide/browser-provider-plugin)
 lifecycle:
 
 - `create_session` (local mode) spawns `obscura serve --port <free>` (plus

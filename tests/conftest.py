@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import abc
 import importlib.util
+import os
 import sys
 import types
 from pathlib import Path
@@ -65,6 +66,11 @@ def _install_browser_provider_stub() -> None:
     mod.BrowserProvider = BrowserProvider
     sys.modules["agent.browser_provider"] = mod
     setattr(agent_pkg, "browser_provider", mod)
+
+    secrets = types.ModuleType("agent.secret_scope")
+    secrets.get_secret = os.environ.get
+    sys.modules["agent.secret_scope"] = secrets
+    setattr(agent_pkg, "secret_scope", secrets)
 
 
 def _load_provider_module() -> None:

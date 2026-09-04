@@ -1,9 +1,8 @@
-"""Obscura local browser provider, plugin form.
+"""Obscura local or remote browser provider, plugin form.
 
-Subclasses :class:`agent.browser_provider.BrowserProvider`. Unlike the cloud
-backends (Browserbase, Browser Use, Firecrawl) this provider runs a *local*
-browser: it spawns ``obscura serve`` as a subprocess and hands the agent the
-process's CDP endpoint. Obscura (https://github.com/h4ckf0r0day/obscura) is a
+Subclasses :class:`agent.browser_provider.BrowserProvider` and either spawns a
+local ``obscura serve`` process or connects to an existing one. Obscura
+(https://github.com/h4ckf0r0day/obscura) is a
 Rust headless browser that speaks the Chrome DevTools Protocol with no Chrome
 or Node.js dependency, a single ~70 MB binary.
 
@@ -26,6 +25,7 @@ Two modes:
 Env vars::
 
     OBSCURA_CDP_URL=             # connect to a running server (remote mode); unset = spawn locally
+    OBSCURA_TOKEN=               # remote mode: Bearer token for /json/version discovery
     OBSCURA_BIN=obscura          # local mode: binary path, or a name on PATH (default "obscura")
     OBSCURA_STEALTH=false        # local mode: pass --stealth (default false)
     OBSCURA_PORT=                # local mode: fixed CDP port (default: an ephemeral free port)
@@ -43,10 +43,12 @@ import threading
 import time
 import uuid
 from typing import Any, Dict, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
 from agent.browser_provider import BrowserProvider
+from agent.secret_scope import get_secret
 
 logger = logging.getLogger(__name__)
 
@@ -55,11 +57,7 @@ _DEFAULT_STARTUP_TIMEOUT = 15.0
 
 
 class ObscuraBrowserProvider(BrowserProvider):
-    """Local Obscura (https://github.com/h4ckf0r0day/obscura) CDP browser.
-
-    Spawns one ``obscura serve`` process per session and tears it down on
-    close. Lives entirely on localhost; no credentials or network calls.
-    """
+    """Local or remote Obscura CDP browser for Hermes."""
 
     def __init__(self) -> None:
         # bb_session_id -> the obscura serve process that session owns (local mode).
@@ -89,12 +87,16 @@ class ObscuraBrowserProvider(BrowserProvider):
         on PATH alike, and appends the Windows executable suffix. Cheap and
         offline: it never spawns anything.
         """
-        return shutil.which(os.environ.get("OBSCURA_BIN", _DEFAULT_BIN))
+        configured = os.environ.get("OBSCURA_BIN", "").strip() or _DEFAULT_BIN
+        return shutil.which(configured)
 
     def is_available(self) -> bool:
         # Remote mode needs no local binary, just a reachable server URL.
-        if _remote_cdp_base() is not None:
-            return True
+        if os.environ.get("OBSCURA_CDP_URL", "").strip():
+            try:
+                return _remote_cdp_base() is not None
+            except ValueError:
+                return False
         return self._resolve_binary() is not None
 
     # ------------------------------------------------------------------
@@ -222,19 +224,10 @@ class ObscuraBrowserProvider(BrowserProvider):
             "name": "Obscura",
             "badge": "local",
             "tag": "Rust headless browser over CDP (local binary or remote/Docker server)",
-            "env_vars": [
-                {
-                    "key": "OBSCURA_BIN",
-                    "prompt": "Path to the obscura binary (optional if 'obscura' is on PATH)",
-                    "url": "https://github.com/h4ckf0r0day/obscura",
-                },
-                {
-                    "key": "OBSCURA_CDP_URL",
-                    "prompt": "Connect to a running obscura server instead of spawning one (e.g. http://127.0.0.1:9222 for Docker)",
-                    "url": "https://github.com/h4ckf0r0day/obscura",
-                },
-            ],
-            "post_setup": "agent_browser",
+            # Hermes currently treats every listed env var as required. Both
+            # local and remote modes are valid without requiring either one.
+            "env_vars": [],
+            "post_setup": "browserbase",
         }
 
 
@@ -290,7 +283,7 @@ def _await_cdp(port: int, proc: subprocess.Popen, timeout: float) -> Optional[st
         try:
             resp = requests.get(version_url, timeout=1.0)
             if resp.ok:
-                ws_url = resp.json().get("webSocketDebuggerUrl")
+                ws_url = _cdp_websocket_url(resp)
                 if ws_url:
                     return ws_url
         except requests.RequestException:
@@ -310,17 +303,60 @@ def _remote_cdp_base() -> Optional[str]:
     raw = os.environ.get("OBSCURA_CDP_URL", "").strip()
     if not raw:
         return None
-    url = raw
-    if url.startswith("ws://"):
-        url = "http://" + url[len("ws://"):]
-    elif url.startswith("wss://"):
-        url = "https://" + url[len("wss://"):]
-    elif not url.startswith(("http://", "https://")):
-        url = "http://" + url
-    # Keep only scheme://host:port.
-    scheme, _, rest = url.partition("://")
-    host_port = rest.split("/", 1)[0]
-    return f"{scheme}://{host_port}"
+    url = raw if "://" in raw else f"http://{raw}"
+    parsed = urlsplit(url)
+    scheme = {"ws": "http", "wss": "https"}.get(parsed.scheme, parsed.scheme)
+    if scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError(
+            "OBSCURA_CDP_URL must be an http(s):// or ws(s):// URL with a host."
+        )
+    if parsed.username or parsed.password:
+        raise ValueError(
+            "OBSCURA_CDP_URL must not contain credentials; use OBSCURA_TOKEN."
+        )
+    return urlunsplit((scheme, parsed.netloc, "", "", ""))
+
+
+def _remote_token() -> Optional[str]:
+    token = str(get_secret("OBSCURA_TOKEN") or "").strip()
+    return token or None
+
+
+def _remote_auth_headers(base: str) -> Dict[str, str]:
+    token = _remote_token()
+    if not token:
+        return {}
+    parsed = urlsplit(base)
+    if parsed.scheme != "https" and parsed.hostname not in {
+        "localhost",
+        "127.0.0.1",
+        "::1",
+    }:
+        raise ValueError(
+            "OBSCURA_TOKEN requires HTTPS for non-local OBSCURA_CDP_URL."
+        )
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _public_websocket_url(base: str, advertised: str) -> str:
+    """Keep a valid advertised URL; repair Obscura's loopback authority."""
+    ws = urlsplit(advertised)
+    if ws.scheme not in {"ws", "wss"} or not ws.hostname:
+        raise ValueError("Obscura returned an invalid webSocketDebuggerUrl.")
+    public = urlsplit(base)
+    if public.scheme == "https" and ws.scheme != "wss" and ws.hostname not in {
+        "localhost",
+        "127.0.0.1",
+        "0.0.0.0",
+        "::1",
+    }:
+        raise ValueError("Obscura returned an insecure WebSocket URL over HTTPS.")
+    if ws.hostname not in {"localhost", "127.0.0.1", "0.0.0.0", "::1"}:
+        return advertised
+    scheme = "wss" if public.scheme == "https" else "ws"
+    return urlunsplit(
+        (scheme, public.netloc, ws.path or "/devtools/browser", ws.query, ws.fragment)
+    )
 
 
 def _await_remote_cdp(base: str, timeout: float) -> Optional[str]:
@@ -332,17 +368,34 @@ def _await_remote_cdp(base: str, timeout: float) -> Optional[str]:
     """
     deadline = time.monotonic() + timeout
     version_url = f"{base}/json/version"
+    headers = _remote_auth_headers(base)
     while time.monotonic() < deadline:
         try:
-            resp = requests.get(version_url, timeout=2.0)
+            resp = requests.get(version_url, headers=headers, timeout=2.0)
+            if resp.status_code in {401, 403}:
+                raise ValueError(
+                    "Obscura authentication failed; check OBSCURA_TOKEN."
+                )
             if resp.ok:
-                ws_url = resp.json().get("webSocketDebuggerUrl")
+                ws_url = _cdp_websocket_url(resp)
                 if ws_url:
-                    return ws_url
+                    return _public_websocket_url(base, ws_url)
         except requests.RequestException:
             pass
         time.sleep(0.2)
     return None
+
+
+def _cdp_websocket_url(response: requests.Response) -> Optional[str]:
+    """Read a non-empty WebSocket URL from a CDP version response."""
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("webSocketDebuggerUrl")
+    return value.strip() if isinstance(value, str) and value.strip() else None
 
 
 def _terminate(proc: subprocess.Popen) -> None:
