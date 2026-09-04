@@ -20,7 +20,11 @@ import time
 import pytest
 import requests
 
-from provider import ObscuraBrowserProvider
+from provider import (
+    ObscuraBrowserProvider,
+    _cdp_websocket_url,
+    _public_websocket_url,
+)
 
 # A real Python program that mimics ``obscura serve --port N``: it serves the
 # ``/json/version`` document the provider polls for, then runs until killed.
@@ -98,6 +102,7 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "OBSCURA_PORT",
         "OBSCURA_STARTUP_TIMEOUT",
         "OBSCURA_CDP_URL",
+        "OBSCURA_TOKEN",
     ):
         monkeypatch.delenv(k, raising=False)
 
@@ -125,13 +130,29 @@ def test_is_available_true_with_resolvable_binary(fake_obscura: str) -> None:
     assert ObscuraBrowserProvider().is_available() is True
 
 
+def test_blank_remote_url_and_binary_use_default_from_path(
+    fake_obscura: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        "PATH", f"{os.path.dirname(fake_obscura)}{os.pathsep}{os.environ['PATH']}"
+    )
+    monkeypatch.setenv("OBSCURA_CDP_URL", "   ")
+    monkeypatch.setenv("OBSCURA_BIN", "   ")
+    provider = ObscuraBrowserProvider()
+    session = provider.create_session("task-blank-env")
+    try:
+        assert session["features"]["local"] is True
+    finally:
+        assert provider.close_session(session["bb_session_id"]) is True
+
+
 def test_identity() -> None:
     p = ObscuraBrowserProvider()
     assert p.name == "obscura"
     assert p.display_name == "Obscura"
     schema = p.get_setup_schema()
-    assert schema["post_setup"] == "agent_browser"
-    assert any(v["key"] == "OBSCURA_BIN" for v in schema["env_vars"])
+    assert schema["post_setup"] == "browserbase"
+    assert schema["env_vars"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -227,15 +248,24 @@ import http.server  # noqa: E402
 class _FakeRemoteServer:
     """A real HTTP server that answers /json/version like a running obscura."""
 
-    def __init__(self, port: int):
-        ws = "ws://127.0.0.1:%d/devtools/browser" % port
+    def __init__(self, port: int, token: str = "", ws_url: str = ""):
+        ws = ws_url or "ws://127.0.0.1:%d/devtools/browser" % port
         payload = json.dumps(
             {"Browser": "Obscura/fake-remote", "webSocketDebuggerUrl": ws}
         ).encode()
 
+        expected_auth = f"Bearer {token}" if token else ""
+
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
                 if self.path == "/json/version":
+                    if (
+                        expected_auth
+                        and self.headers.get("Authorization") != expected_auth
+                    ):
+                        self.send_response(401)
+                        self.end_headers()
+                        return
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
                     self.send_header("Content-Length", str(len(payload)))
@@ -305,3 +335,59 @@ def test_remote_mode_raises_when_server_unreachable(
     monkeypatch.setenv("OBSCURA_STARTUP_TIMEOUT", "1")
     with pytest.raises(RuntimeError, match="did not respond"):
         ObscuraBrowserProvider().create_session("task-remote-3")
+
+
+def test_remote_bearer_discovery_preserves_signed_websocket_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    port = _free_port()
+    advertised = f"ws://127.0.0.1:{port}/custom/browser?sig=signed"
+    with _FakeRemoteServer(port, token="secret", ws_url=advertised):
+        monkeypatch.setenv("OBSCURA_CDP_URL", f"http://localhost:{port}")
+        monkeypatch.setenv("OBSCURA_TOKEN", " secret ")
+        provider = ObscuraBrowserProvider()
+        session = provider.create_session("task-auth")
+        assert session["cdp_url"] == (
+            f"ws://localhost:{port}/custom/browser?sig=signed"
+        )
+        assert provider.close_session(session["bb_session_id"]) is True
+
+
+def test_remote_bearer_rejects_bad_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    port = _free_port()
+    with _FakeRemoteServer(port, token="correct"):
+        monkeypatch.setenv("OBSCURA_CDP_URL", f"http://127.0.0.1:{port}")
+        monkeypatch.setenv("OBSCURA_TOKEN", "wrong")
+        with pytest.raises(ValueError, match="authentication failed"):
+            ObscuraBrowserProvider().create_session("task-bad-auth")
+
+
+def test_remote_bearer_rejects_plain_http_off_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OBSCURA_CDP_URL", "http://browser.example")
+    monkeypatch.setenv("OBSCURA_TOKEN", "secret")
+    with pytest.raises(ValueError, match="requires HTTPS"):
+        ObscuraBrowserProvider().create_session("task-insecure-auth")
+
+
+def test_invalid_remote_url_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OBSCURA_CDP_URL", "ftp://browser.example")
+    provider = ObscuraBrowserProvider()
+    assert provider.is_available() is False
+    with pytest.raises(ValueError, match="must be an http"):
+        provider.create_session("task-invalid-url")
+
+
+def test_rejects_insecure_websocket_from_https_proxy() -> None:
+    with pytest.raises(ValueError, match="insecure WebSocket"):
+        _public_websocket_url(
+            "https://browser.example", "ws://backend.example/devtools/browser"
+        )
+
+
+def test_ignores_malformed_cdp_version_payload() -> None:
+    response = requests.Response()
+    response.status_code = 200
+    response._content = b"[]"
+    assert _cdp_websocket_url(response) is None

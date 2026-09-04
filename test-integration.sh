@@ -20,7 +20,7 @@
 
 set -uo pipefail
 
-PLUGIN_REPO="SGavrl/hermes-plugin-obscura"
+PLUGIN_REPO="Company-OS-IA/hermes-obscura-plugin"
 PLUGIN_NAME="browser-obscura"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -33,12 +33,20 @@ warn(){ echo "${c_y}NOTE${c_0} $*"; }
 hr(){ echo "------------------------------------------------------------"; }
 die(){ fail "$*"; echo; echo "Stopped at the first failure. Fix the above and re-run."; exit 1; }
 
+RUN_TMP="$(mktemp -d)" || die "could not create temporary directory"
+SPID=""
+cleanup() {
+    if [ -n "$SPID" ]; then kill "$SPID" 2>/dev/null; wait "$SPID" 2>/dev/null; fi
+    rm -rf -- "$RUN_TMP"
+}
+trap cleanup EXIT
+
 # ===========================================================================
 hr; echo "LEVEL 0 — plugin's own tests (no Hermes, no key)"; hr
 # ===========================================================================
 if ! command -v python3 >/dev/null 2>&1; then die "python3 not found"; fi
 info "installing test deps into a throwaway venv"
-VENV="$(mktemp -d)/venv"
+VENV="$RUN_TMP/venv"
 python3 -m venv "$VENV" || die "could not create venv (need python3-venv)"
 # shellcheck disable=SC1091
 source "$VENV/bin/activate"
@@ -65,18 +73,22 @@ info "obscura at: $OBSCURA"
 # quick standalone CDP smoke: start serve, curl /json/version, stop
 info "smoke test: obscura serve + CDP /json/version"
 SPORT=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')
-"$OBSCURA" serve --port "$SPORT" >/tmp/obscura-smoke.log 2>&1 &
+SMOKE_LOG="$RUN_TMP/obscura-smoke.log"
+CDP_JSON="$RUN_TMP/cdp.json"
+"$OBSCURA" serve --port "$SPORT" >"$SMOKE_LOG" 2>&1 &
 SPID=$!
 for _ in $(seq 1 30); do
-    if curl -fsS "http://127.0.0.1:$SPORT/json/version" >/tmp/cdp.json 2>/dev/null; then break; fi
+    if curl -fsS "http://127.0.0.1:$SPORT/json/version" >"$CDP_JSON" 2>/dev/null; then break; fi
     sleep 0.3
 done
-if grep -q webSocketDebuggerUrl /tmp/cdp.json 2>/dev/null; then
-    pass "obscura CDP endpoint is live: $(python3 -c 'import json;print(json.load(open("/tmp/cdp.json")).get("webSocketDebuggerUrl",""))')"
+if grep -q webSocketDebuggerUrl "$CDP_JSON" 2>/dev/null; then
+    pass "obscura CDP endpoint is live: $(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("webSocketDebuggerUrl",""))' "$CDP_JSON")"
 else
-    kill "$SPID" 2>/dev/null; die "obscura serve did not expose a CDP endpoint — see /tmp/obscura-smoke.log"
+    cat "$SMOKE_LOG"
+    die "obscura serve did not expose a CDP endpoint"
 fi
 kill "$SPID" 2>/dev/null; wait "$SPID" 2>/dev/null
+SPID=""
 
 # ===========================================================================
 hr; echo "LEVEL 2 — Hermes install + register + spawn"; hr
@@ -94,11 +106,12 @@ fi
 info "hermes found: $(command -v hermes)"
 
 info "installing the plugin from ${PLUGIN_REPO}"
-if hermes plugins install "$PLUGIN_REPO" --yes 2>/tmp/plug-install.log || hermes plugins install "$PLUGIN_REPO" 2>/tmp/plug-install.log; then
+PLUGIN_LOG="$RUN_TMP/plugin-install.log"
+if hermes plugins install "$PLUGIN_REPO" --yes 2>"$PLUGIN_LOG" || hermes plugins install "$PLUGIN_REPO" 2>"$PLUGIN_LOG"; then
     pass "hermes plugins install ran"
 else
-    cat /tmp/plug-install.log
-    die "hermes plugins install failed. Paste /tmp/plug-install.log to debug the manifest/entry point."
+    cat "$PLUGIN_LOG"
+    die "hermes plugins install failed. See $PLUGIN_LOG for details."
 fi
 
 info "checking it registered"
@@ -114,14 +127,14 @@ fi
 # we import the provider through Hermes and drive its create_session directly.
 info "confirming the browser provider registers and spawns obscura (no LLM)"
 export OBSCURA_BIN="$OBSCURA"
-python3 - "$OBSCURA" <<'PY'
+if python3 - "$OBSCURA" <<'PY'
 import os, sys, importlib, time, json, urllib.request
 # Ask Hermes for its browser registry and pull the obscura provider out of it.
 try:
     from agent import browser_registry as reg
 except Exception as e:
-    print("NOTE could not import agent.browser_registry (%s); skipping live spawn check" % e)
-    sys.exit(0)
+    print("FAIL could not import agent.browser_registry: %s" % e)
+    sys.exit(1)
 
 # Force plugin discovery the same way a Hermes run would.
 try:
@@ -136,9 +149,9 @@ except Exception:
 providers = getattr(reg, "_providers", {})
 prov = providers.get("obscura")
 if prov is None:
-    print("NOTE 'obscura' provider not in registry yet. Enable the plugin and re-run.")
+    print("FAIL 'obscura' provider not in registry. Enable the plugin and re-run.")
     print("     Registered:", list(providers))
-    sys.exit(0)
+    sys.exit(1)
 
 print("--->  provider registered:", type(prov).__name__)
 if not prov.is_available():
@@ -147,7 +160,7 @@ if not prov.is_available():
 sess = prov.create_session("smoke-task")
 print("--->  create_session returned:", json.dumps(sess)[:200])
 cdp = sess.get("cdp_url") or sess.get("cdpUrl") or sess.get("connect_url") or ""
-sid = sess.get("session_id") or sess.get("id") or "smoke-task"
+sid = sess.get("bb_session_id")
 ok = False
 if cdp:
     base = cdp.replace("ws://","http://").split("/devtools")[0]
@@ -158,10 +171,19 @@ if cdp:
         print("NOTE could not curl the returned CDP endpoint:", e)
 print(("PASS" if ok else "NOTE"), "obscura spawned via Hermes provider; CDP reachable =", ok)
 try:
-    prov.close_session(sid); print("--->  close_session ok")
+    if not sid or not prov.close_session(sid):
+        print("FAIL close_session did not close the provider session"); sys.exit(1)
+    print("--->  close_session ok")
 except Exception as e:
-    print("NOTE close_session raised:", e)
+    print("FAIL close_session raised:", e); sys.exit(1)
+if not ok:
+    sys.exit(1)
 PY
+then
+    pass "Hermes registered Obscura and completed the CDP lifecycle"
+else
+    die "Hermes provider integration failed"
+fi
 
 echo
 hr; echo "DONE"; hr
