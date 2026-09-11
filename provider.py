@@ -1,11 +1,9 @@
-"""Obscura local browser provider, plugin form.
+"""Obscura browser provider for Hermes.
 
-Subclasses :class:`agent.browser_provider.BrowserProvider`. Unlike the cloud
-backends (Browserbase, Browser Use, Firecrawl) this provider runs a *local*
-browser: it spawns ``obscura serve`` as a subprocess and hands the agent the
-process's CDP endpoint. Obscura (https://github.com/h4ckf0r0day/obscura) is a
-Rust headless browser that speaks the Chrome DevTools Protocol with no Chrome
-or Node.js dependency, a single ~70 MB binary.
+Subclasses :class:`agent.browser_provider.BrowserProvider`. In local mode it
+spawns ``obscura serve`` and hands Hermes the process's CDP endpoint. Obscura
+(https://github.com/h4ckf0r0day/obscura) is an independent Rust browser engine,
+not a Chromium wrapper.
 
 Opt-in only. The registry never auto-selects Obscura; choose it explicitly::
 
@@ -20,8 +18,9 @@ Two modes:
   running in Docker or on another host). Set ``OBSCURA_CDP_URL`` and the provider
   connects instead of spawning; the external server owns its own lifecycle, so
   the provider never starts or stops it. This is how you run Obscura in its own
-  container: ``docker run -p 9222:9222 <obscura-image> serve --host 0.0.0.0``
-  then ``OBSCURA_CDP_URL=http://127.0.0.1:9222``.
+  container: ``docker run -p 127.0.0.1:9222:9222
+  h4ckf0r0day/obscura`` then
+  ``OBSCURA_CDP_URL=http://127.0.0.1:9222``.
 
 Env vars::
 
@@ -222,19 +221,11 @@ class ObscuraBrowserProvider(BrowserProvider):
             "name": "Obscura",
             "badge": "local",
             "tag": "Rust headless browser over CDP (local binary or remote/Docker server)",
-            "env_vars": [
-                {
-                    "key": "OBSCURA_BIN",
-                    "prompt": "Path to the obscura binary (optional if 'obscura' is on PATH)",
-                    "url": "https://github.com/h4ckf0r0day/obscura",
-                },
-                {
-                    "key": "OBSCURA_CDP_URL",
-                    "prompt": "Connect to a running obscura server instead of spawning one (e.g. http://127.0.0.1:9222 for Docker)",
-                    "url": "https://github.com/h4ckf0r0day/obscura",
-                },
-            ],
-            "post_setup": "agent_browser",
+            # Hermes treats every listed variable as required, but these are
+            # optional alternatives: PATH/OBSCURA_BIN or OBSCURA_CDP_URL.
+            "env_vars": [],
+            # Install Hermes's CDP client without provisioning Chromium.
+            "post_setup": "browserbase",
         }
 
 

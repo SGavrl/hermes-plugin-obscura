@@ -1,9 +1,9 @@
-"""Obscura local browser plugin for Hermes.
+"""Obscura browser plugin for Hermes.
 
-Registers Obscura as a browser provider: instead of calling a cloud API,
-``create_session`` spawns ``obscura serve`` on a free port and hands the agent
-its CDP endpoint. Opt-in via ``browser.cloud_provider: obscura`` in config.yaml;
-the registry never auto-selects it.
+Registers Obscura as a browser provider. ``create_session`` either spawns
+``obscura serve`` on a free port or connects to ``OBSCURA_CDP_URL`` and hands
+Hermes its CDP endpoint. Opt in via ``browser.cloud_provider: obscura`` in
+config.yaml; the registry never auto-selects it.
 
 ``provider.py`` holds the provider class; ``register`` instantiates and
 registers it through the plugin context, the same entry point every Hermes
