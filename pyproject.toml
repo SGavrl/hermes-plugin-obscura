@@ -1,7 +1,7 @@
 [project]
 name = "hermes-plugin-obscura"
-version = "1.0.0"
-description = "Obscura local headless browser backend for Hermes (spawns obscura serve, drives it over CDP)."
+version = "1.0.1"
+description = "Obscura browser backend for Hermes, using a local or remote CDP server."
 license = "Apache-2.0"
 requires-python = ">=3.9"
 dependencies = [

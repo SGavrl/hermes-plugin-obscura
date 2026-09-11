@@ -2,18 +2,15 @@
 
 Run [Hermes](https://github.com/NousResearch/hermes-agent) browser tasks on
 [Obscura](https://github.com/h4ckf0r0day/obscura), a Rust headless browser that
-speaks the Chrome DevTools Protocol with no Chrome or Node.js dependency. One
-~70 MB binary, ~30 MB RAM at runtime, instant cold start.
+speaks the Chrome DevTools Protocol without running Chrome or Chromium.
 
-This is a **local** browser backend. Instead of calling a cloud API, the plugin
-spawns `obscura serve` on a free port and hands the agent that process's CDP
-endpoint, one process per session, torn down on session close.
+By default the plugin spawns `obscura serve` on a free local port and tears it
+down when the session closes. It can also connect to an existing Obscura server.
 
 ## Why Obscura
 
-- **Light.** ~70 MB binary and ~30 MB RAM vs a full Chromium or Firefox, so you
-  can run many concurrent agent sessions on one box.
-- **No browser install.** No Chrome, Chromium, or Node to provision.
+- **Independent engine.** Obscura does not launch Chrome or Chromium underneath.
+- **Simple deployment.** Run a local binary or connect to an Obscura container.
 - **CDP-native.** It emulates headless Chrome over the DevTools Protocol, so the
   existing Hermes browser tools drive it unchanged.
 - **Optional stealth.** A consistent browser fingerprint plus tracker blocking
@@ -21,14 +18,20 @@ endpoint, one process per session, torn down on session close.
 
 ## Install
 
-1. Get the Obscura binary on the host: build it from
+1. For local mode, get the Obscura binary on the host: build it from
    [h4ckf0r0day/obscura](https://github.com/h4ckf0r0day/obscura) and put it on
-   `PATH`, or point `OBSCURA_BIN` at it.
+   `PATH`, or point `OBSCURA_BIN` at it. Skip this step for remote mode.
 
 2. Install the plugin:
 
    ```
-   hermes plugins install SGavrl/hermes-plugin-obscura
+   hermes plugins install SGavrl/hermes-plugin-obscura --enable
+   ```
+
+   If it is already installed but disabled, run:
+
+   ```bash
+   hermes plugins enable browser-obscura
    ```
 
 3. Select it in `config.yaml`:
@@ -49,14 +52,14 @@ session and owns its lifecycle. Just have the binary on `PATH` or set
 
 **Remote / Docker.** Point the plugin at an already-running `obscura serve` and
 it connects instead of spawning. The external server owns its own lifecycle, so
-the plugin never starts or stops it. The official image already serves CDP on
-`0.0.0.0:9222` by default:
+the plugin never starts or stops it. The official image serves CDP on container
+port 9222 by default:
 
 ```bash
-docker run -d -p 9222:9222 h4ckf0r0day/obscura
+docker run -d --name obscura -p 127.0.0.1:9222:9222 h4ckf0r0day/obscura
 ```
 
-then set `OBSCURA_CDP_URL`:
+then set `OBSCURA_CDP_URL` in `~/.hermes/.env`:
 
 ```bash
 OBSCURA_CDP_URL=http://127.0.0.1:9222
@@ -64,6 +67,15 @@ OBSCURA_CDP_URL=http://127.0.0.1:9222
 
 This is the way to scale Obscura independently of Hermes, or share one server
 across sessions. No local binary is needed in this mode.
+
+The CDP endpoint controls the browser and has no built-in authentication. Keep
+it on loopback or a trusted private network; do not publish port 9222 directly
+to the internet. For a server on another machine, an SSH tunnel is a simple
+option:
+
+```bash
+ssh -L 9222:127.0.0.1:9222 user@obscura-host
+```
 
 ## Configuration
 
@@ -79,10 +91,14 @@ All optional, via environment variables:
 
 See `.env.example` and `config.yaml.example`.
 
+Hermes currently treats every environment variable declared by a provider's
+setup screen as required. Because `OBSCURA_BIN` and `OBSCURA_CDP_URL` are
+optional alternatives, configure them manually rather than through that screen.
+
 ## How it works
 
 `ObscuraBrowserProvider` implements the Hermes
-[`BrowserProvider`](https://github.com/NousResearch/hermes-agent/blob/main/agent/browser_provider.py)
+[`BrowserProvider`](https://hermes-agent.nousresearch.com/docs/developer-guide/browser-provider-plugin)
 lifecycle:
 
 - `create_session` (local mode) spawns `obscura serve --port <free>` (plus
@@ -98,11 +114,15 @@ lifecycle:
 The plugin touches no Hermes core files. It registers through the standard
 plugin entry point (`register(ctx)` calling `ctx.register_browser_provider`).
 
+For Hermes plugin installation and enablement, see the
+[Hermes plugin guide](https://hermes-agent.nousresearch.com/docs/user-guide/features/plugins).
+
 ## Development
 
 ```
 pip install -e ".[test]"
 pytest
+hermes plugins validate .
 ```
 
 The tests use a real fake `obscura` binary (a small Python HTTP server that

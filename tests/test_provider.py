@@ -130,8 +130,8 @@ def test_identity() -> None:
     assert p.name == "obscura"
     assert p.display_name == "Obscura"
     schema = p.get_setup_schema()
-    assert schema["post_setup"] == "agent_browser"
-    assert any(v["key"] == "OBSCURA_BIN" for v in schema["env_vars"])
+    assert schema["post_setup"] == "browserbase"
+    assert schema["env_vars"] == []
 
 
 # ---------------------------------------------------------------------------

@@ -14,15 +14,25 @@
 #   OBSCURA_BIN=/path/to/obscura ./test-integration.sh
 #   (or put `obscura` on PATH first)
 #
-# Safe to re-run. Everything Hermes-side goes under ~/.hermes; nothing else on
-# the box is touched. The script never installs Hermes for you if it is missing;
-# it tells you the one command to run and stops, so you stay in control of that.
+# Safe to re-run. The installed plugin copy is refreshed from GitHub. The script
+# never installs Hermes for you if it is missing; it reports that and stops.
 
 set -uo pipefail
 
-PLUGIN_REPO="SGavrl/hermes-plugin-obscura"
-PLUGIN_NAME="browser-obscura"
+PLUGIN_REPO="${PLUGIN_REPO:-SGavrl/hermes-plugin-obscura}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TMP_DIR="$(mktemp -d)"
+VENV="$TMP_DIR/venv"
+SPID=""
+
+cleanup() {
+    if [ -n "$SPID" ]; then
+        kill "$SPID" 2>/dev/null || true
+        wait "$SPID" 2>/dev/null || true
+    fi
+    rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT INT TERM
 
 # ---- pretty output ---------------------------------------------------------
 c_g=$'\033[32m'; c_r=$'\033[31m'; c_y=$'\033[33m'; c_b=$'\033[36m'; c_0=$'\033[0m'
@@ -38,7 +48,6 @@ hr; echo "LEVEL 0 — plugin's own tests (no Hermes, no key)"; hr
 # ===========================================================================
 if ! command -v python3 >/dev/null 2>&1; then die "python3 not found"; fi
 info "installing test deps into a throwaway venv"
-VENV="$(mktemp -d)/venv"
 python3 -m venv "$VENV" || die "could not create venv (need python3-venv)"
 # shellcheck disable=SC1091
 source "$VENV/bin/activate"
@@ -64,19 +73,27 @@ info "obscura at: $OBSCURA"
 
 # quick standalone CDP smoke: start serve, curl /json/version, stop
 info "smoke test: obscura serve + CDP /json/version"
-SPORT=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')
-"$OBSCURA" serve --port "$SPORT" >/tmp/obscura-smoke.log 2>&1 &
+SPORT=$(python3 - <<'PY'
+import socket
+
+with socket.socket() as sock:
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
+PY
+)
+"$OBSCURA" serve --port "$SPORT" >"$TMP_DIR/obscura-smoke.log" 2>&1 &
 SPID=$!
 for _ in $(seq 1 30); do
-    if curl -fsS "http://127.0.0.1:$SPORT/json/version" >/tmp/cdp.json 2>/dev/null; then break; fi
+    if curl -fsS "http://127.0.0.1:$SPORT/json/version" >"$TMP_DIR/cdp.json" 2>/dev/null; then break; fi
     sleep 0.3
 done
-if grep -q webSocketDebuggerUrl /tmp/cdp.json 2>/dev/null; then
-    pass "obscura CDP endpoint is live: $(python3 -c 'import json;print(json.load(open("/tmp/cdp.json")).get("webSocketDebuggerUrl",""))')"
+if grep -q webSocketDebuggerUrl "$TMP_DIR/cdp.json" 2>/dev/null; then
+    pass "obscura CDP endpoint is live: $(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("webSocketDebuggerUrl",""))' "$TMP_DIR/cdp.json")"
 else
-    kill "$SPID" 2>/dev/null; die "obscura serve did not expose a CDP endpoint — see /tmp/obscura-smoke.log"
+    die "obscura serve did not expose a CDP endpoint — see $TMP_DIR/obscura-smoke.log"
 fi
 kill "$SPID" 2>/dev/null; wait "$SPID" 2>/dev/null
+SPID=""
 
 # ===========================================================================
 hr; echo "LEVEL 2 — Hermes install + register + spawn"; hr
@@ -84,8 +101,8 @@ hr; echo "LEVEL 2 — Hermes install + register + spawn"; hr
 if ! command -v hermes >/dev/null 2>&1; then
     warn "Hermes is not installed on this box."
     echo
-    echo "  Install it (their official installer), then re-run this script:"
-    echo "     ${c_b}curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash${c_0}"
+    echo "  Install it using the official instructions, then re-run this script:"
+    echo "     ${c_b}https://hermes-agent.nousresearch.com/docs/getting-started/installation${c_0}"
     echo
     echo "  Levels 0 and 1 already passed, so the plugin and engine are good."
     echo "  Level 2 needs Hermes present; stopping here without failing."
@@ -93,74 +110,92 @@ if ! command -v hermes >/dev/null 2>&1; then
 fi
 info "hermes found: $(command -v hermes)"
 
-info "installing the plugin from ${PLUGIN_REPO}"
-if hermes plugins install "$PLUGIN_REPO" --yes 2>/tmp/plug-install.log || hermes plugins install "$PLUGIN_REPO" 2>/tmp/plug-install.log; then
-    pass "hermes plugins install ran"
+info "validating this checkout with Hermes"
+if hermes plugins validate "$SCRIPT_DIR" >"$TMP_DIR/plugin-validate.log" 2>&1; then
+    pass "hermes plugins validate passed"
 else
-    cat /tmp/plug-install.log
-    die "hermes plugins install failed. Paste /tmp/plug-install.log to debug the manifest/entry point."
+    cat "$TMP_DIR/plugin-validate.log"
+    die "hermes plugins validate failed"
 fi
 
-info "checking it registered"
-if hermes plugins list 2>/dev/null | grep -qi "obscura"; then
-    pass "plugin appears in 'hermes plugins list'"
-    hermes plugins list 2>/dev/null | grep -i obscura
+info "installing and enabling the plugin from ${PLUGIN_REPO}"
+if hermes plugins install "$PLUGIN_REPO" --force --enable >"$TMP_DIR/plugin-install.log" 2>&1; then
+    pass "plugin installed and enabled"
 else
-    warn "plugin not shown in 'hermes plugins list' — it may need enabling:"
-    echo "     hermes plugins enable ${PLUGIN_NAME}"
+    cat "$TMP_DIR/plugin-install.log"
+    die "hermes plugins install failed"
 fi
 
-# confirm the provider registers and can be selected. This does NOT need a model:
-# we import the provider through Hermes and drive its create_session directly.
-info "confirming the browser provider registers and spawns obscura (no LLM)"
+# Confirm the enabled plugin registers and can create a session. This does not
+# need a model; it uses Hermes's supported discovery and registry APIs.
+info "confirming the provider registers, spawns, and closes Obscura (no LLM)"
 export OBSCURA_BIN="$OBSCURA"
-python3 - "$OBSCURA" <<'PY'
-import os, sys, importlib, time, json, urllib.request
-# Ask Hermes for its browser registry and pull the obscura provider out of it.
+HERMES_PYTHON="${HERMES_PYTHON:-python3}"
+if ! "$HERMES_PYTHON" -c 'import hermes_cli' >/dev/null 2>&1; then
+    die "${HERMES_PYTHON} cannot import Hermes; set HERMES_PYTHON to the Python used by the hermes command"
+fi
+"$HERMES_PYTHON" <<'PY'
+import json
+import sys
+import urllib.request
+from urllib.parse import urlsplit, urlunsplit
+
 try:
-    from agent import browser_registry as reg
-except Exception as e:
-    print("NOTE could not import agent.browser_registry (%s); skipping live spawn check" % e)
-    sys.exit(0)
+    from agent.browser_registry import get_provider, list_providers
+    from hermes_cli.plugins import discover_plugins
+except Exception as exc:
+    print("FAIL could not import current Hermes plugin APIs:", exc)
+    sys.exit(1)
 
-# Force plugin discovery the same way a Hermes run would.
 try:
-    from hermes_cli import plugins as hp
-    for fn in ("load_plugins","discover_and_register","load_all"):
-        if hasattr(hp, fn):
-            try: getattr(hp, fn)()
-            except Exception: pass
-except Exception:
-    pass
+    discover_plugins(force=True)
+except Exception as exc:
+    print("FAIL Hermes plugin discovery failed:", exc)
+    sys.exit(1)
+provider = get_provider("obscura")
+if provider is None:
+    print("FAIL 'obscura' did not register; registered:", [p.name for p in list_providers()])
+    sys.exit(1)
+if not provider.is_available():
+    print("FAIL provider.is_available() is false; check OBSCURA_BIN")
+    sys.exit(1)
 
-providers = getattr(reg, "_providers", {})
-prov = providers.get("obscura")
-if prov is None:
-    print("NOTE 'obscura' provider not in registry yet. Enable the plugin and re-run.")
-    print("     Registered:", list(providers))
-    sys.exit(0)
-
-print("--->  provider registered:", type(prov).__name__)
-if not prov.is_available():
-    print("FAIL provider.is_available() is False — check OBSCURA_BIN"); sys.exit(1)
-
-sess = prov.create_session("smoke-task")
-print("--->  create_session returned:", json.dumps(sess)[:200])
-cdp = sess.get("cdp_url") or sess.get("cdpUrl") or sess.get("connect_url") or ""
-sid = sess.get("session_id") or sess.get("id") or "smoke-task"
-ok = False
-if cdp:
-    base = cdp.replace("ws://","http://").split("/devtools")[0]
-    try:
-        with urllib.request.urlopen(base + "/json/version", timeout=3) as r:
-            ok = b"webSocketDebuggerUrl" in r.read()
-    except Exception as e:
-        print("NOTE could not curl the returned CDP endpoint:", e)
-print(("PASS" if ok else "NOTE"), "obscura spawned via Hermes provider; CDP reachable =", ok)
+session = None
+failed = False
 try:
-    prov.close_session(sid); print("--->  close_session ok")
-except Exception as e:
-    print("NOTE close_session raised:", e)
+    session = provider.create_session("smoke-task")
+    cdp_url = session.get("cdp_url")
+    session_id = session.get("bb_session_id")
+    if not isinstance(cdp_url, str) or not cdp_url:
+        raise RuntimeError("create_session did not return cdp_url")
+    if not isinstance(session_id, str) or not session_id:
+        raise RuntimeError("create_session did not return bb_session_id")
+
+    parsed = urlsplit(cdp_url)
+    version_url = urlunsplit(
+        ({"ws": "http", "wss": "https"}.get(parsed.scheme, parsed.scheme),
+         parsed.netloc, "/json/version", "", "")
+    )
+    with urllib.request.urlopen(version_url, timeout=3) as response:
+        payload = json.load(response)
+    if not payload.get("webSocketDebuggerUrl"):
+        raise RuntimeError("/json/version did not return webSocketDebuggerUrl")
+    print("--->  provider registered:", type(provider).__name__)
+    print("--->  create_session returned:", json.dumps(session, sort_keys=True)[:240])
+    print("PASS Obscura CDP endpoint is reachable")
+except Exception as exc:
+    failed = True
+    print("FAIL provider lifecycle:", exc)
+finally:
+    if session is not None:
+        session_id = session.get("bb_session_id")
+        if not session_id or not provider.close_session(session_id):
+            failed = True
+            print("FAIL close_session did not close the provider session")
+        else:
+            print("PASS close_session closed the provider session")
+
+sys.exit(1 if failed else 0)
 PY
 
 echo
