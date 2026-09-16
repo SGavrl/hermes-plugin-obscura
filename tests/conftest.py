@@ -1,17 +1,18 @@
 """Test setup for the standalone plugin repo.
 
-`provider.py` imports `agent.browser_provider.BrowserProvider` from Hermes core.
-When the tests run inside a full Hermes checkout that import resolves normally.
-When they run standalone (this repo's own CI, where Hermes is not installed), we
-register a minimal stub of that module so the provider imports and its lifecycle
-can be exercised against the real `obscura serve` spawn path. The stub mirrors
-the real ABC's surface; if the real Hermes package is importable we use it.
+`provider.py` imports `agent.browser_provider.BrowserProvider` and
+`hermes_constants.get_hermes_home` from Hermes core. When the tests run inside
+a full Hermes checkout those imports resolve normally. When they run standalone
+(this repo's own CI, where Hermes is not installed), we register minimal stubs
+so the provider imports and its lifecycle can be exercised against the real
+`obscura serve` spawn path. The stubs mirror only the imported surface.
 """
 
 from __future__ import annotations
 
 import abc
 import importlib.util
+import os
 import sys
 import types
 from pathlib import Path
@@ -67,6 +68,20 @@ def _install_browser_provider_stub() -> None:
     setattr(agent_pkg, "browser_provider", mod)
 
 
+def _install_hermes_constants_stub() -> None:
+    if importlib.util.find_spec("hermes_constants") is not None:
+        return  # Real Hermes is available; use its resolver.
+
+    mod = types.ModuleType("hermes_constants")
+
+    def get_hermes_home() -> Path:
+        configured = os.environ.get("HERMES_HOME", "").strip()
+        return Path(configured) if configured else Path.home() / ".hermes"
+
+    mod.get_hermes_home = get_hermes_home
+    sys.modules["hermes_constants"] = mod
+
+
 def _load_provider_module() -> None:
     """Import provider.py by file path as the top-level module ``provider`` so
     ``from provider import ObscuraBrowserProvider`` in the tests resolves without
@@ -81,4 +96,5 @@ def _load_provider_module() -> None:
 
 
 _install_browser_provider_stub()
+_install_hermes_constants_stub()
 _load_provider_module()

@@ -95,9 +95,11 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for k in (
         "OBSCURA_BIN",
         "OBSCURA_STEALTH",
+        "OBSCURA_PERSIST_SESSION",
         "OBSCURA_PORT",
         "OBSCURA_STARTUP_TIMEOUT",
         "OBSCURA_CDP_URL",
+        "HERMES_HOME",
     ):
         monkeypatch.delenv(k, raising=False)
 
@@ -139,7 +141,11 @@ def test_identity() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_create_session_spawns_and_returns_live_cdp_url(fake_obscura: str) -> None:
+def test_create_session_spawns_and_returns_live_cdp_url(
+    fake_obscura: str, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    argv_file = tmp_path / "argv.txt"
+    monkeypatch.setenv("FAKE_ARGV_FILE", str(argv_file))
     provider = ObscuraBrowserProvider()
     session = provider.create_session("task-abc")
     try:
@@ -155,6 +161,7 @@ def test_create_session_spawns_and_returns_live_cdp_url(fake_obscura: str) -> No
         resp = requests.get(f"http://127.0.0.1:{port}/json/version", timeout=3)
         assert resp.ok
         assert resp.json()["webSocketDebuggerUrl"] == cdp_url
+        assert "--storage-dir" not in argv_file.read_text().split()
     finally:
         assert provider.close_session(session["bb_session_id"]) is True
 
@@ -197,6 +204,26 @@ def test_stealth_flag_forwarded(
     try:
         assert session["features"]["stealth"] is True
         assert "--stealth" in argv_file.read_text().split()
+    finally:
+        provider.close_session(session["bb_session_id"])
+
+
+def test_session_persistence_uses_the_hermes_profile_cache(
+    fake_obscura: str, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    argv_file = tmp_path / "argv.txt"
+    hermes_home = tmp_path / "profile"
+    storage_dir = hermes_home / "cache" / "obscura"
+    monkeypatch.setenv("FAKE_ARGV_FILE", str(argv_file))
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("OBSCURA_PERSIST_SESSION", "true")
+
+    provider = ObscuraBrowserProvider()
+    session = provider.create_session("task-persistent")
+    try:
+        args = argv_file.read_text().split()
+        assert args[args.index("--storage-dir") + 1] == str(storage_dir)
+        assert storage_dir.is_dir()
     finally:
         provider.close_session(session["bb_session_id"])
 

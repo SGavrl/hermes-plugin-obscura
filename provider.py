@@ -27,6 +27,7 @@ Env vars::
     OBSCURA_CDP_URL=             # connect to a running server (remote mode); unset = spawn locally
     OBSCURA_BIN=obscura          # local mode: binary path, or a name on PATH (default "obscura")
     OBSCURA_STEALTH=false        # local mode: pass --stealth (default false)
+    OBSCURA_PERSIST_SESSION=false  # local mode: persist state in <HERMES_HOME>/cache/obscura
     OBSCURA_PORT=                # local mode: fixed CDP port (default: an ephemeral free port)
     OBSCURA_STARTUP_TIMEOUT=15   # seconds to wait for the CDP server (default 15)
 """
@@ -46,6 +47,7 @@ from typing import Any, Dict, Optional
 import requests
 
 from agent.browser_provider import BrowserProvider
+from hermes_constants import get_hermes_home
 
 logger = logging.getLogger(__name__)
 
@@ -114,10 +116,17 @@ class ObscuraBrowserProvider(BrowserProvider):
             )
 
         stealth = os.environ.get("OBSCURA_STEALTH", "false").lower() == "true"
+        persist_session = (
+            os.environ.get("OBSCURA_PERSIST_SESSION", "false").lower() == "true"
+        )
         port = _resolve_port(os.environ.get("OBSCURA_PORT"))
         timeout = _resolve_timeout(os.environ.get("OBSCURA_STARTUP_TIMEOUT"))
 
         cmd = [binary, "serve", "--port", str(port)]
+        if persist_session:
+            storage_dir = get_hermes_home() / "cache" / "obscura"
+            storage_dir.mkdir(parents=True, exist_ok=True)
+            cmd.extend(("--storage-dir", str(storage_dir)))
         if stealth:
             cmd.append("--stealth")
 
@@ -145,11 +154,12 @@ class ObscuraBrowserProvider(BrowserProvider):
         session_name = f"hermes_{task_id}_{session_id[:8]}"
         features = {"stealth": stealth, "local": True}
         logger.info(
-            "Started Obscura session %s (pid %s, port %s, stealth=%s)",
+            "Started Obscura session %s (pid %s, port %s, stealth=%s, persistence=%s)",
             session_name,
             proc.pid,
             port,
             stealth,
+            persist_session,
         )
         return {
             "session_name": session_name,

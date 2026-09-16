@@ -20,5 +20,6 @@ Three steps to use it:
      cloud_provider: "obscura"
    ```
 
-Optional env vars: `OBSCURA_STEALTH`, `OBSCURA_PORT`, and
-`OBSCURA_STARTUP_TIMEOUT`. See the README for details and network safety notes.
+Optional env vars: `OBSCURA_STEALTH`, `OBSCURA_PERSIST_SESSION`,
+`OBSCURA_PORT`, and `OBSCURA_STARTUP_TIMEOUT`. See the README for details and
+network safety notes.

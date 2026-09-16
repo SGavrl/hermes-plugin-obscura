@@ -86,6 +86,7 @@ All optional, via environment variables:
 | `OBSCURA_CDP_URL` | (unset) | Connect to a running server (remote mode). Unset means spawn locally. Accepts `http(s)://host:port` or a `ws(s)://` endpoint. |
 | `OBSCURA_BIN` | `obscura` | Local mode: binary path, or a name resolved on `PATH`. |
 | `OBSCURA_STEALTH` | `false` | Local mode: pass `--stealth` (consistent fingerprint + tracker blocking). |
+| `OBSCURA_PERSIST_SESSION` | `false` | Local mode: persist cookies and localStorage in `<HERMES_HOME>/cache/obscura`. |
 | `OBSCURA_PORT` | (ephemeral) | Local mode: fixed CDP port. Default asks the OS for a free port. |
 | `OBSCURA_STARTUP_TIMEOUT` | `15` | Seconds to wait for the CDP server to come up. |
 
@@ -94,6 +95,77 @@ See `.env.example` and `config.yaml.example`.
 Hermes currently treats every environment variable declared by a provider's
 setup screen as required. Because `OBSCURA_BIN` and `OBSCURA_CDP_URL` are
 optional alternatives, configure them manually rather than through that screen.
+
+## Persist cookies and storage
+
+Set `OBSCURA_PERSIST_SESSION=true` to pass
+`--storage-dir <HERMES_HOME>/cache/obscura` when the plugin starts a local
+server. Hermes resolves `HERMES_HOME` to the active profile home, or its
+platform default when unset, so every profile keeps isolated browser state.
+The option is off by default. It does not configure an `OBSCURA_CDP_URL`
+server; pass `--storage-dir` when starting that server yourself.
+
+```bash
+# ~/.hermes/.env, or the active profile's .env
+OBSCURA_PERSIST_SESSION=true
+```
+
+All local CDP sessions for that profile read and write the same directory.
+Run Hermes under separate profiles for isolated browser identities.
+
+### Layout
+
+Inside `<HERMES_HOME>/cache/obscura`:
+
+* `cookies.json`: cookie jar in a stable format with `same_site`, `expires`,
+  `http_only`, and `secure`.
+* `localStorage/<origin>.json`: one file per origin.
+
+Inspect a cookie jar with `jq`:
+
+```bash
+jq '.[] | select(.domain == "example.com")' \
+  "$HERMES_HOME/cache/obscura/cookies.json"
+```
+
+### When state is written
+
+* On clean process exit (Ctrl-C, SIGTERM).
+* After every navigation completes (CDP `Page.navigate`).
+* Manually via CDP `Network.setCookie` and `Network.deleteCookies`.
+
+### Clear state
+
+Remove the profile-local directory:
+
+```bash
+rm -rf "$HERMES_HOME/cache/obscura"
+```
+
+
+### Direct Obscura CLI
+
+For standalone Obscura use, choose a storage directory explicitly:
+
+```bash
+obscura fetch https://example.com --storage-dir ./obscura-data
+obscura fetch https://example.com --storage-dir ./obscura-data
+```
+
+The second invocation starts with the cookies and localStorage left by the
+first. To serve CDP clients with the same state:
+
+```bash
+obscura serve --storage-dir ./obscura-data
+```
+
+Run separate servers with different storage directories for isolated
+identities:
+
+```bash
+obscura serve --port 9222 --storage-dir ./identity-a
+obscura serve --port 9223 --storage-dir ./identity-b
+```
 
 ## How it works
 
