@@ -15,6 +15,7 @@ import os
 import re
 import socket
 import stat
+import sys
 import time
 
 import pytest
@@ -26,7 +27,53 @@ from provider import ObscuraBrowserProvider
 # ``/json/version`` document the provider polls for, then runs until killed.
 # When FAKE_ARGV_FILE is set it records its argv so a test can assert the CLI
 # shape (e.g. that ``--stealth`` was forwarded).
-_FAKE_OBSCURA = """#!/usr/bin/env python3
+# On Windows the fake runs through a .bat shim, so the provider's Popen process
+# is cmd.exe: TerminateProcess on it would orphan the python grandchild and
+# leave the port serving. This snippet makes the fake exit as soon as its
+# parent disappears (pure stdlib: poll the parent process handle).
+_WATCHDOG = """
+import os as _os
+if _os.name == "nt":
+    import threading as _threading
+    import ctypes as _ctypes
+    import time as _time
+
+    def _parent_watchdog():
+        # Open a handle to the parent (the cmd.exe shim) ONCE and wait on it.
+        # Polling OpenProcess is unreliable: while any handle to the parent
+        # remains open (Popen holds one until its object is collected) the
+        # exited process object stays alive, so OpenProcess keeps succeeding
+        # and the watchdog never fires; the PID can also be recycled. A single
+        # handle plus WaitForSingleObject signals exactly when the parent
+        # terminates, with no such race.
+        #
+        # The restype/argtypes matter: ctypes defaults to a 32-bit c_int, which
+        # truncates the 64-bit HANDLE, so WaitForSingleObject would receive a
+        # garbage handle and never signal (the fake then outlives the shim).
+        kernel32 = _ctypes.windll.kernel32
+        kernel32.OpenProcess.restype = _ctypes.c_void_p
+        kernel32.OpenProcess.argtypes = [
+            _ctypes.c_uint32, _ctypes.c_int, _ctypes.c_uint32]
+        kernel32.WaitForSingleObject.restype = _ctypes.c_uint32
+        kernel32.WaitForSingleObject.argtypes = [_ctypes.c_void_p, _ctypes.c_uint32]
+        SYNCHRONIZE = 0x00100000
+        INFINITE = 0xFFFFFFFF
+        ppid = _os.getppid()
+        handle = None
+        for _ in range(50):  # retry ~5s if the handle is momentarily unavailable
+            handle = kernel32.OpenProcess(SYNCHRONIZE, False, ppid)
+            if handle:
+                break
+            _time.sleep(0.1)
+        if not handle:
+            return  # cannot watch the parent; leave the fake running
+        kernel32.WaitForSingleObject(handle, INFINITE)
+        _os._exit(0)  # parent (cmd.exe shim) is gone
+
+    _threading.Thread(target=_parent_watchdog, daemon=True).start()
+"""
+
+_FAKE_OBSCURA = "#!/usr/bin/env python3\n" + _WATCHDOG + """
 import sys, os, json, http.server, socketserver
 
 args = sys.argv[1:]
@@ -72,13 +119,31 @@ with socketserver.TCPServer(("127.0.0.1", port), Handler) as srv:
 
 # A fake that never serves anything: it just sleeps, so the provider's readiness
 # poll times out and create_session raises.
-_FAKE_OBSCURA_NEVER_READY = """#!/usr/bin/env python3
+_FAKE_OBSCURA_NEVER_READY = "#!/usr/bin/env python3\n" + _WATCHDOG + """
 import time
 time.sleep(60)
 """
 
 
 def _write_fake(path, body: str) -> str:
+    if sys.platform == "win32":
+        # shutil.which cannot resolve an extensionless script on Windows, and
+        # CreateProcess cannot execute a shebang script directly. Ship the
+        # same script as a .py plus a .bat shim that runs it; shutil.which
+        # resolves the .bat and CreateProcess runs it.
+        py = path.with_suffix(".py")
+        py.write_text(body)
+        # Invoke the *base* interpreter, not a venv's python.exe: the venv
+        # executable is itself a launcher stub that spawns the real
+        # interpreter, so the chain would be cmd.exe -> launcher -> python.
+        # The parent watchdog (one level up) cannot cover two indirections,
+        # and terminating the shim would orphan both descendants.
+        exe = getattr(sys, "_base_executable", None)
+        if not exe or not os.path.exists(exe):
+            exe = sys.executable
+        bat = path.with_suffix(".bat")
+        bat.write_text('"' + exe + '" "' + str(py) + '" %*' + chr(13) + chr(10))
+        return str(bat)
     path.write_text(body)
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return str(path)
@@ -158,10 +223,19 @@ def test_create_session_spawns_and_returns_live_cdp_url(fake_obscura: str) -> No
     finally:
         assert provider.close_session(session["bb_session_id"]) is True
 
-    # After close the process is gone, so the port stops serving.
-    time.sleep(0.5)
-    with pytest.raises(requests.RequestException):
-        requests.get(f"http://127.0.0.1:{port}/json/version", timeout=1)
+    # After close the process is gone, so the port stops serving. On Windows the
+    # fake runs through a cmd.exe shim, so the python grandchild can briefly
+    # outlive the handle the provider terminates; poll instead of a fixed sleep
+    # so the check is not racy.
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            requests.get(f"http://127.0.0.1:{port}/json/version", timeout=1)
+        except requests.RequestException:
+            break
+        time.sleep(0.1)
+    else:
+        pytest.fail(f"port {port} still served after close_session")
 
 
 def test_close_unknown_session_returns_false(fake_obscura: str) -> None:

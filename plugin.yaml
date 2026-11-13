@@ -1,8 +1,9 @@
 manifest_version: 1
 name: browser-obscura
-version: 1.0.1
+version: 1.0.2
 description: "Obscura browser backend for Hermes. Spawns a local Obscura process or connects to an existing server over CDP; opt-in via browser.cloud_provider: obscura."
 author: SGavrl
+requires_hermes: ">=0.21.6"
 kind: backend
 provides_browser_providers:
   - obscura

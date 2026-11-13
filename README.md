@@ -7,6 +7,9 @@ speaks the Chrome DevTools Protocol without running Chrome or Chromium.
 By default the plugin spawns `obscura serve` on a free local port and tears it
 down when the session closes. It can also connect to an existing Obscura server.
 
+Requires Hermes Agent v0.21.6 or newer (also declared as `requires_hermes` in
+`plugin.yaml`); CI validates against the current stable release.
+
 ## Why Obscura
 
 - **Independent engine.** Obscura does not launch Chrome or Chromium underneath.
